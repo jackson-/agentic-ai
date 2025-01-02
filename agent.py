@@ -1,4 +1,5 @@
 import spacy
+import re
 
 # Load Spacy NLP model
 nlp = spacy.load("en_core_web_sm")
@@ -7,28 +8,45 @@ nlp = spacy.load("en_core_web_sm")
 DENIAL_TEMPLATES = {
     "CO-50": "Medical Neccesity",
     "CO-45": "Coding Error",
+    "N10": "Payment Issue",
+    "N30": "Coverage Issue"
 }
 
-# Keywords to identify relevant sentences
-KEYWORDS = {"pain", "discomfort", "experienced", "partial"}
+# Keywords to identify relevant and non-relevant sentences
+KEYWORDS = {"pain", "discomfort", "experienced", "partial", "blurry", "fatigued", "lightheaded"}
+NON_KEYWORDS = {"no", "not"}
+
+def contains_word(word, text):
+    return re.search(rf'\b{re.escape(word)}\b', text)
 
 def extract_denial_details(denial_text, patient_name):
     """
     Extract claim denial details using regex and NLP.
     """
-    claim_pattern = r"(?m)^\d+\.\s+Claim Number: (?P<ClaimNumber>\w+)\n\s+Patient Name: (?P<PatientName>.+)\n\s+Date of Service: (?P<DateOfService>.+)\n\s+Procedure Code: (?P<ProcedureCode>.+)\n\s+Billed Amount: (?P<BilledAmount>.+)\n\s+Allowed Amount: (?P<AllowedAmount>.+)\n\s+Patient Responsibility: (?P<PatientResponsibility>.+)\n\s+Paid Amount: (?P<PaidAmount>.+)\n\s+Adjustment: (?P<Adjustment>.+)\n\s+CARC: (?P<CARC>\w+-\w+)(?:\n\s+RARC: (?P<RARC>.+))?"
-
+    claim_pattern = (
+        r"Claim Number:\s*(?P<ClaimNumber>.+)\n\s*"
+        r"Patient Name:\s*(?P<PatientName>.+)\n\s*"
+        r"Date of Service:\s*(?P<DateOfService>.+)\n\s*"
+        r"Procedure Code:\s*(?P<ProcedureCode>.+)\n\s*"
+        r"Billed Amount:\s*(?P<BilledAmount>.+)\n\s*"
+        r"Allowed Amount:\s*(?P<AllowedAmount>.+)\n\s*"
+        r"Patient Responsibility:\s*(?P<PatientResponsibility>.+)\n\s*"
+        r"Paid Amount:\s*(?P<PaidAmount>.+)\n\s*"
+        r"Adjustment:\s*(?P<Adjustment>.+)\n\s*"
+        r"CARC:\s*(?P<CARC>CO-\d+).+\n?\s*"
+        r"(RARC:\s*(?P<RARC>N\d+))?"
+    )
     # Find all matches
     target_claim = None
     claims = [match.groupdict() for match in re.finditer(claim_pattern, denial_text)]
+    print(claims)
     for claim in claims:
-        print(claim)
         if claim["PatientName"] == patient_name:
             target_claim = claim
             break
     return target_claim
 
-def extract_sentences_from_json(data, keywords):
+def extract_sentences_from_json(data, keywords, non_keywords):
     """
     Recursively traverse the JSON object, extract sentences, and filter them based on keywords.
     """
@@ -36,17 +54,17 @@ def extract_sentences_from_json(data, keywords):
 
     if isinstance(data, dict):
         for key, value in data.items():
-            justification.extend(extract_sentences_from_json(value, keywords))
+            justification.extend(extract_sentences_from_json(value, keywords, non_keywords))
     elif isinstance(data, list):
         for item in data:
-            justification.extend(extract_sentences_from_json(item, keywords))
+            justification.extend(extract_sentences_from_json(item, keywords, non_keywords))
     elif isinstance(data, str):
         # Use Spacy to split text into sentences
         doc = nlp(data)
         for sent in doc.sents:
-            if any(keyword in sent.text.lower() for keyword in keywords):
+            if any(keyword in sent.text.lower() for keyword in keywords) and not any(contains_word(non_keyword, sent.text.lower()) for non_keyword in NON_KEYWORDS):
                 justification.append(sent.text.strip())
-    
+
     return justification
 
 def generate_appeal(claim, clinical_notes):
@@ -54,15 +72,15 @@ def generate_appeal(claim, clinical_notes):
     Generate an appeal JSON using denial details and clinical notes.
     """
     # Extract justification sentences from the entire medical note
-    justification_sentences = extract_sentences_from_json(clinical_notes, KEYWORDS)
+    justification_sentences = extract_sentences_from_json(clinical_notes, KEYWORDS, NON_KEYWORDS)
     medical_justification = " ".join(justification_sentences)
-    
+
     appeal = {
         "Patient": claim["PatientName"],
         "Claim Number": claim["ClaimNumber"],
         "Date of Service": claim["DateOfService"],
         "Procedure Code": claim["ProcedureCode"],
-        "Reason for Appeal": f'{DENIAL_TEMPLATES.get(claim["CARC"], "No predefined reason available.")} {": " + claim["RARC"]}',
+        "Reason for Appeal": f'{DENIAL_TEMPLATES.get(claim["CARC"], "No predefined reason available.")}{": " + DENIAL_TEMPLATES.get(claim["RARC"]) if claim["RARC"] else ""}',
         "Justification": medical_justification,
         "Request": "Please reconsider the claim and approve coverage as it was medically necessary."
     }
@@ -73,8 +91,8 @@ denial_text = """
 ******ELECTRONIC REMITTANCE ADVICE******
 
 Payer: Medicare
-Payment Amount: $2,443.01
-Payment ID: INV-207B-H&1
+Payment Amount: $0.00
+Payment ID: INV-412X-KW3
 Vendor ID: 173829
 Vendor Name: Sample Medical Practice
 
@@ -85,46 +103,23 @@ Payment Details:
 
 Claim Details:
 
-1. Claim Number: CLM123456
-   Patient Name: John Doe
-   Date of Service: 2024-12-01
-   Procedure Code: 99213 (Office visit, established patient)
-   Billed Amount: $150.00
-   Allowed Amount: $85.00
-   Patient Responsibility: $20.00 (Copay)
-   Paid Amount: $65.00
-   Adjustment: -$65.00
-   CARC: CO-45 (Charge exceeds fee schedule/maximum allowable)
-   RARC: N30 (Patient ineligible for this service)
+Claim Number: CLM567890
+Patient Name: Carmen Lopez
+Date of Service: 2024-12-15
+Procedure Code: 80048 (Basic metabolic panel)
+Billed Amount: $55.00
+Allowed Amount: $0.00
+Patient Responsibility: $0.00
+Paid Amount: $0.00
+Adjustment: -$55.00
+CARC: CO-50 (Not deemed a medical necessity)
+RARC: N10 (Payment based on the findings of a review organization)
 
-2. Claim Number: CLM789012
-   Patient Name: Jane Smith
-   Date of Service: 2024-12-05
-   Procedure Code: 85025 (Complete blood count)
-   Billed Amount: $50.00
-   Allowed Amount: $30.00
-   Patient Responsibility: $0.00
-   Paid Amount: $30.00
-   Adjustment: -$20.00
-   CARC: CO-45 (Charge exceeds fee schedule/maximum allowable)
-
-3. Claim Number: CLM345678
-   Patient Name: Robert Johnson
-   Date of Service: 2024-12-10
-   Procedure Code: 73030 (X-ray, shoulder, 2 views)
-   Billed Amount: $75.00
-   Allowed Amount: $0.00
-   Patient Responsibility: $0.00
-   Paid Amount: $0.00
-   Adjustment: -$75.00
-   CARC: CO-50 (Not deemed a medical necessity)
-   RARC: N10 (Payment based on the findings of a review organization)
-
-Total Billed Amount: $275.00
-Total Allowed Amount: $115.00
-Total Patient Responsibility: $20.00
-Total Paid Amount: $95.00
-Total Adjustments: -$160.00
+Total Billed Amount: $55.00
+Total Allowed Amount: $0.00
+Total Patient Responsibility: $0.00
+Total Paid Amount: $0.00
+Total Adjustments: -$55.00
 
 If you have any questions regarding this remittance advice, please contact our Provider Services department at 1-800-555-1234 or email providerservices@medicare.gov.
 
@@ -134,76 +129,53 @@ Medicare Claims Processing Department
 
 # Example Clinical Notes JSON
 clinical_note = {
-    "Patient Name": "Robert Johnson",
-    "DOB": "07/15/1960",
-    "Date of Service": "2024-12-10",
-    "Provider": "Dr. Jane Provider, MD",
-    "Chief Complaint (CC)": "Left shoulder pain and limited range of motion.",
-    "History of Present Illness (HPI)": (
-        "Mr. Robert Johnson is a 64-year-old male presenting with a 3-week history of "
-        "progressive left shoulder pain. He reports that the discomfort began after slipping "
-        "on ice and catching himself with his left arm extended. Since then, he has experienced "
-        "intermittent, dull to sharp pain localized to the anterior and lateral aspects of the "
-        "left shoulder. The pain is worse with overhead activities, lying on the affected side, "
-        "and during attempts to lift moderately heavy objects. He denies numbness, tingling, or "
-        "referred pain down the arm. Over-the-counter NSAIDs have provided only partial relief. "
-        "There is no history of recent fevers, unexplained weight loss, or prior shoulder surgeries. "
-        "He has no known allergies and no recent changes in his daily activities, aside from avoiding "
-        "certain movements due to discomfort."
-    ),
-    "Review of Systems (ROS)": {
-        "Musculoskeletal": "Reports left shoulder pain as described in HPI; denies joint swelling or redness in other joints.",
-        "Neurological": "Denies numbness, tingling, or weakness distally in the left arm.",
-        "General": "Denies fever, chills, weight loss.",
-        "Cardiovascular and Respiratory": "No chest pain, palpitations, shortness of breath, or wheezing.",
-        "Other Systems": "All other systems reviewed and negative unless noted above."
-    },
-    "Vital Signs": {
-        "Blood Pressure": "124/76 mmHg",
-        "Heart Rate": "76 bpm",
-        "Respiratory Rate": "16/min",
-        "Temperature": "98.5°F (36.9°C)",
-        "Oxygen Saturation": "98% on room air"
-    },
-    "Physical Examination": {
-        "General": "Appears alert and in no acute distress, though guards the left shoulder somewhat when moving.",
-        "Left Shoulder": {
-            "Inspection": "No visible swelling, redness, or deformity.",
-            "Palpation": "Tenderness over the anterior aspect of the left shoulder and mildly over the greater tuberosity region.",
-            "Range of Motion": (
-                "Forward flexion and abduction limited by about 20% compared to the right shoulder due to pain. "
-                "Pain is elicited at approximately 90° of abduction and with internal rotation maneuvers."
-            ),
-            "Special Tests": (
-                "Positive painful arc test at around 80-100° of abduction. Mild discomfort with Neer’s and Hawkins’ "
-                "tests suggest possible impingement. No gross instability but difficulty maintaining full abduction "
-                "against resistance suggests possible rotator cuff involvement."
-            )
-        },
-        "Cardiovascular": "Regular rate and rhythm, no murmurs.",
-        "Respiratory": "Clear to auscultation bilaterally, no wheezes, rales, or rhonchi."
-    },
-    "Results (Prior to Imaging)": (
-        "No lab work has been performed at this visit. No prior imaging studies of the shoulder available "
-        "for comparison."
-    ),
-    "Orders": [
-        "Order left shoulder X-ray (AP and scapular Y views) to assess bony anatomy and look for any structural abnormalities.",
-        "Prescribe a short course of NSAIDs for pain control (as tolerated).",
-        "Recommend physical therapy consultation focusing on rotator cuff strengthening, scapular stabilization exercises, and stretching."
-    ],
-    "Assessment and Plan": {
-        "Assessment": (
-            "Likely rotator cuff tendinopathy/subacromial impingement secondary to a fall, with ongoing pain "
-            "and limited range of motion. Need to rule out subtle fracture or bony abnormalities."
-        ),
-        "Plan": [
-            "Obtain left shoulder X-ray (2 views) to evaluate osseous structures and exclude fractures or significant degenerative changes.",
-            "Continue conservative management with NSAIDs and PT referral.",
-            "Follow-up in 2-3 weeks or sooner if symptoms worsen. Consider MRI if X-ray is unremarkable and symptoms persist."
-        ]
-    }
+  "Patient Name": "Carmen Lopez",
+  "DOB": "1975-11-02",
+  "Date of Service": "2024-12-15",
+  "Provider": "Dr. Daniel Rivera, MD",
+  "Chief Complaint (CC)": "Decreased urine output and general malaise.",
+  "History of Present Illness (HPI)": "Ms. Carmen Lopez is a 49-year-old female presenting with 3 days of reduced urine output, mild diffuse fatigue, and intermittent nausea. She reports having been recently treated for a urinary tract infection with antibiotics about 2 weeks ago. Since then, she has noticed a gradual decrease in urine volume. She denies flank pain, severe abdominal pain, or changes in fluid intake. She also denies recent fevers or chills. No significant changes in diet or medications, other than the recent antibiotic course. She has a history of hypertension, controlled on a low-dose ACE inhibitor, and no known chronic kidney disease prior to this episode.",
+  "Review of Systems (ROS)": {
+    "General": "Fatigue, mild malaise.",
+    "Genitourinary": "Markedly decreased urine output over the past 72 hours. No gross hematuria reported.",
+    "Gastrointestinal": "Intermittent nausea, no vomiting, stable appetite.",
+    "Cardiovascular": "No chest pain, palpitations, or lower extremity edema.",
+    "Neurological": "No headaches, confusion, or changes in mental status.",
+    "Musculoskeletal": "No new joint pains or swelling.",
+    "Other Systems": "All other systems negative unless noted."
+  },
+  "Vital Signs": {
+    "Blood Pressure": "142/88 mmHg",
+    "Heart Rate": "78 bpm",
+    "Respiratory Rate": "18/min",
+    "Temperature": "98.2°F (36.8°C)",
+    "Oxygen Saturation": "98% on room air"
+  },
+  "Physical Examination": {
+    "General": "Appears tired but not in acute distress.",
+    "Cardiovascular": "Regular rate and rhythm, no murmurs. Peripheral pulses intact.",
+    "Respiratory": "Clear to auscultation bilaterally, no wheezes, rales, or rhonchi."
+  },
+  "Results": "No current labs available at the time of evaluation. No imaging results. Past medical history includes hypertension but no known renal issues.",
+  "Orders": [
+    "Order serum creatinine, BUN, electrolytes, and estimated GFR to assess kidney function.",
+    "Obtain a urinalysis and urine microscopy to evaluate for possible acute kidney injury etiology.",
+    "Order renal ultrasound to rule out obstructive causes of acute kidney injury."
+  ],
+  "Assessment and Plan": {
+    "Assessment": "Suspected acute kidney injury (AKI), possibly pre-renal vs. acute interstitial nephritis post recent antibiotic use. Further workup needed.",
+    "Plan": [
+      "Obtain lab tests to confirm AKI and determine severity.",
+      "Assess for underlying cause (e.g., volume depletion, medication effect, obstruction).",
+      "Consider holding ACE inhibitor temporarily if kidney function is significantly impaired.",
+      "Follow up within 24-48 hours with lab results. If worsening, consider referral to nephrology."
+    ]
+  }
 }
+
+
+
+
 
 claim = extract_denial_details(denial_text, clinical_note['Patient Name'])
 if claim:
